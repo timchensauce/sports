@@ -2,7 +2,7 @@
 
 A Streamlit app that compares odds across sportsbooks using [The Odds API](https://the-odds-api.com), removes the vig, and tells you whether each line is a **BET**, **LEAN**, **CHECK** or **PASS**, with the reasoning.
 
-**Covers:** moneylines (including 3-way soccer markets with a draw), spreads, totals, and a parlay checker.
+**Covers:** NBA, NFL, NCAA men's basketball (NCAAB), NCAA football (NCAAF) and MLB, compiled into one ranked list of picks. Markets: moneylines, spreads, totals, plus a parlay checker. Leagues are toggleable and out-of-season leagues are skipped.
 
 ## Run locally
 ```bash
@@ -20,14 +20,14 @@ No key? The app runs on built-in demo data.
 Never commit your key. `.gitignore` already excludes `secrets.toml`.
 
 ## How it works
-1. Per-book vig removal (proportional normalization).
+1. Per-book vig removal (power method by default, which corrects longshot bias; proportional optional).
 2. Weighted consensus probability (sharp books such as Pinnacle weighted 3x by default; add the EU region to get Pinnacle).
 3. EV = fair p x decimal odds - 1; edge = fair p - implied p.
 4. **BET**: EV >= your minimum, edge > book disagreement, confidence not low. **LEAN**: positive EV, weaker evidence, half stake. **CHECK**: EV above your suspicious threshold (likely stale line). **PASS**: no edge.
 5. Stake: fractional Kelly, capped at a max % of bankroll.
 
 ## API credits
-Each refresh costs (regions x markets) credits. Odds are cached for 5 minutes to protect your quota.
+Each refresh costs (leagues x regions x markets) credits, so 5 leagues x 1 region x 3 markets = 15. Turn off leagues you don't need. Odds are cached for 5 minutes to protect your quota.
 
 ## Limitations
 - Consensus is an estimate, not truth; the app finds the best price, it does not predict outcomes.

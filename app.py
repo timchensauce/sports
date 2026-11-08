@@ -10,6 +10,9 @@ API = "https://api.the-odds-api.com/v4"
 REGIONS = {"us": "US", "us2": "US (more books)", "uk": "UK", "eu": "EU (includes Pinnacle)", "au": "Australia"}
 MARKETS = {"h2h": "Moneyline / 3-way", "spreads": "Spreads", "totals": "Totals"}
 ICON = {"BET": "✅", "LEAN": "🟡", "CHECK": "⚠️", "PASS": "⛔"}
+ORDER = {"BET": 0, "LEAN": 1, "CHECK": 2, "PASS": 3}
+LEAGUES = {"basketball_nba": "NBA", "americanfootball_nfl": "NFL", "basketball_ncaab": "NCAAB",
+           "americanfootball_ncaaf": "NCAAF", "baseball_mlb": "MLB"}
 
 st.set_page_config(page_title="Bet or Pass", page_icon="🎯", layout="wide")
 
@@ -43,14 +46,7 @@ def demo_events():
             {"key": "totals", "outcomes": [{"name": "Over", "price": d[4], "point": 220.5},
                                           {"name": "Under", "price": d[5], "point": 220.5}]}]})
     return [{"id": "demo", "home_team": "Boston Celtics", "away_team": "New York Knicks",
-             "commence_time": t, "bookmakers": bks}]
-
-
-@st.cache_data(ttl=600, show_spinner=False)
-def get_sports(key):
-    r = requests.get(f"{API}/sports", params={"apiKey": key}, timeout=20)
-    r.raise_for_status()
-    return [s for s in r.json() if s.get("active") and not s.get("has_outrights")]
+             "commence_time": t, "league": "NBA", "bookmakers": bks}]
 
 
 @st.cache_data(ttl=300, show_spinner="Fetching odds…")
@@ -82,7 +78,19 @@ def groups(e):
     return out
 
 
-def build(events, sharp, sharp_w, min_books):
+def devig(p, method):
+    imp = {l: 1 / x for l, x in p.items()}
+    tot = sum(imp.values())
+    if method == "power" and tot > 1:  # power method: shrinks longshots more than favorites
+        lo, hi = 1.0, 20.0
+        for _ in range(60):
+            k = (lo + hi) / 2
+            lo, hi = (k, hi) if sum(v ** k for v in imp.values()) > 1 else (lo, k)
+        return {l: v ** k for l, v in imp.items()}
+    return {l: v / tot for l, v in imp.items()}
+
+
+def build(events, sharp, sharp_w, min_books, method="power"):
     rows = []
     for e in events:
         for (mkt, _line), books in groups(e).items():
@@ -97,9 +105,8 @@ def build(events, sharp, sharp_w, min_books):
             w = {b: (sharp_w if b[0] in sharp else 1.0) for b in full}
             sw = sum(w.values())
             nv = {}
-            for b, p in full.items():  # proportional vig removal per book
-                tot = sum(1 / x for x in p.values())
-                nv[b] = {l: (1 / x) / tot for l, x in p.items()}
+            for b, p in full.items():
+                nv[b] = devig(p, method)
             cons = {l: sum(w[b] * nv[b][l] for b in full) / sw for l in ref}
             sd = sum(math.sqrt(sum(w[b] * (nv[b][l] - cons[l]) ** 2 for b in full) / sw) for l in ref) / len(ref)
             conf = "high" if len(full) >= 4 and sd < .015 else "medium" if len(full) >= 3 and sd < .03 else "low"
@@ -107,7 +114,7 @@ def build(events, sharp, sharp_w, min_books):
             for (bk, bt), p in full.items():
                 for l, d in p.items():
                     rows.append(dict(
-                        game=f'{e["away_team"]} @ {e["home_team"]}', start=e["commence_time"], market=mkt,
+                        league=e.get("league", ""), game=f'{e["away_team"]} @ {e["home_team"]}', start=e["commence_time"], market=mkt,
                         pick=l, book=bt, book_key=bk, price=d, american=to_am(d), implied=1 / d, fair=cons[l],
                         edge=cons[l] - 1 / d, ev=cons[l] * d - 1, sd=sd, n_books=len(full), conf=conf, sharp_used=used))
     return pd.DataFrame(rows)
@@ -145,7 +152,14 @@ def explain(r):
         pts.append("**Warning:** EV this high usually means a stale line, a typo, or news already priced in. "
                    "Confirm the price in the book's app and check injuries before betting.")
     if r["verdict"] == "LEAN":
-        pts.append("**Why only a lean:** positive EV, but low confidence or the edge is within normal book noise. Half stake.")
+        why = []
+        if r["conf"] == "low":
+            why.append("confidence is low")
+        if r["edge"] <= r["sd"]:
+            why.append("the edge is within normal book disagreement")
+        pts.append("**Why only a lean:** EV is positive, but " + " and ".join(why or ["the evidence is thin"]) + ". Half stake.")
+    if r["verdict"] in ("BET", "LEAN") and r["american"] >= 300:
+        pts.append("**Longshot:** at this price a small error in the fair probability swings EV a lot. Size down.")
     if r["verdict"] == "BET":
         pts.append(f'**Sizing:** ${r["stake"]:,.0f} (fractional Kelly, capped by your max stake).')
     return "\n\n".join(pts)
@@ -164,7 +178,9 @@ with st.sidebar:
     regions = st.multiselect("Regions", list(REGIONS), default=["us"], format_func=REGIONS.get,
                              help="Add EU to include Pinnacle, the sharpest reference price.")
     markets = st.multiselect("Markets", list(MARKETS), default=list(MARKETS), format_func=MARKETS.get)
-    st.caption(f"API cost: {max(1, len(regions)) * max(1, len(markets))} credit(s) per refresh.")
+    leagues = st.multiselect("Leagues", list(LEAGUES), default=list(LEAGUES), format_func=LEAGUES.get)
+    st.caption(f"API cost: {max(1, len(leagues)) * max(1, len(regions)) * max(1, len(markets))} credits per refresh "
+               "(leagues × regions × markets). Out-of-season leagues return nothing.")
     st.subheader("Your rules")
     bank = st.number_input("Bankroll ($)", 10.0, value=1000.0, step=100.0)
     min_ev = st.number_input("Minimum EV to bet (%)", 0.0, 20.0, 2.0, 0.5) / 100
@@ -175,40 +191,47 @@ with st.sidebar:
     sharp = st.multiselect("Sharp book keys", ["pinnacle", "matchbook", "betfair_ex_eu", "betfair_ex_uk", "lowvig"],
                            default=["pinnacle"])
     sharp_w = st.slider("Sharp book weight", 1.0, 6.0, 3.0, 0.5)
+    method = st.selectbox("Vig removal", ["power", "proportional"],
+                          format_func=lambda x: "Power (corrects longshot bias)" if x == "power" else "Proportional")
     hide_started = st.checkbox("Hide games already started", value=True)
 
 S = dict(bank=bank, min_ev=min_ev, kelly=kelly, max_pct=max_pct, max_ev=max_ev)
 
 # ---------- data ----------
 st.title("🎯 Bet or Pass")
-st.caption("Multi-book +EV finder for moneylines (incl. 3-way), spreads, totals and parlays.")
+st.caption("NBA, NFL, NCAAB, NCAAF and MLB compiled into one ranked list of picks across books.")
 
 remaining = None
 if not key:
     st.info("Demo mode: showing sample data. Add your Odds API key in the sidebar for live odds.")
     events = demo_events()
 else:
-    try:
-        sports = get_sports(key)
-        labels = {s["key"]: f'{s["group"]}: {s["title"]}' for s in sports}
-        keys = list(labels)
-        sport = st.selectbox("Sport", keys, index=keys.index("basketball_nba") if "basketball_nba" in keys else 0,
-                             format_func=labels.get)
-        events, remaining = get_odds(key, sport, ",".join(regions or ["us"]), ",".join(markets or ["h2h"]))
-    except requests.HTTPError as ex:
-        code = ex.response.status_code
-        st.error("Invalid API key." if code == 401 else "Out of API credits." if code == 429
-                 else f"Odds API error {code}: {ex.response.text[:200]}")
-        st.stop()
-    except requests.RequestException as ex:
-        st.error(f"Network error: {ex}")
-        st.stop()
+    events, skipped = [], []
+    for lg in leagues:
+        try:
+            got, rem = get_odds(key, lg, ",".join(regions or ["us"]), ",".join(markets or ["h2h"]))
+        except requests.HTTPError as ex:
+            code = ex.response.status_code
+            if code in (401, 429):
+                st.error("Invalid API key." if code == 401 else "Out of API credits.")
+                st.stop()
+            skipped.append(LEAGUES[lg])
+            continue
+        except requests.RequestException as ex:
+            st.error(f"Network error: {ex}")
+            st.stop()
+        remaining = rem or remaining
+        for e in got:
+            e["league"] = LEAGUES[lg]
+            events.append(e)
+    if skipped:
+        st.caption("No odds available for: " + ", ".join(skipped))
 
 if hide_started:
     now = dt.datetime.now(dt.timezone.utc)
     events = [e for e in events if dt.datetime.fromisoformat(e["commence_time"].replace("Z", "+00:00")) > now]
 
-df = build(events, set(sharp), sharp_w, int(min_books))
+df = build(events, set(sharp), sharp_w, int(min_books), method)
 if df.empty:
     st.warning("No markets with enough books to compare. Add regions, lower “Min books per market”, or pick another sport.")
     st.stop()
@@ -219,7 +242,9 @@ df["stake"] = df.apply(lambda r: stake(r, S), axis=1)
 my_books = st.multiselect("Books I can bet at", sorted(df["book"].unique()), default=sorted(df["book"].unique()),
                           help="Fair prices use every book. Picks are limited to the books you choose.")
 mine = df[df["book"].isin(my_books)]
-picks = (mine[mine["verdict"] != "PASS"].sort_values("ev", ascending=False)
+picks = mine[mine["verdict"] != "PASS"].copy()
+picks["rank"] = picks["verdict"].map(ORDER)
+picks = (picks.sort_values(["rank", "ev"], ascending=[True, False])
          .drop_duplicates(["game", "market", "pick"]))
 
 c = st.columns(4)
@@ -233,21 +258,27 @@ t1, t2, t3, t4 = st.tabs(["Picks", "All lines", "Parlay checker", "How it works"
 with t1:
     if picks.empty:
         st.info("Nothing clears your bar right now. Passing is a valid answer.")
+    if not picks.empty:
+        st.caption("Picks by league: " + ", ".join(f"{k} {v}" for k, v in picks["league"].value_counts().items())
+                   + ". Ranked BET first, then LEAN, then CHECK, best EV first within each.")
     for r in picks.head(25).to_dict("records"):
         with st.container(border=True):
             a, b = st.columns([1, 4])
             a.markdown(f'### {ICON[r["verdict"]]} {r["verdict"]}')
             a.caption(f'Stake ${r["stake"]:,.0f}' if r["stake"] else "No stake")
             b.markdown(f'**{r["pick"]}** at **{r["book"]} ({r["american"]:+d})** · {MARKETS[r["market"]]}')
-            b.caption(f'{r["game"]} · {pd.to_datetime(r["start"]).strftime("%a %b %d %H:%M UTC")}')
+            b.caption(f'{r["league"]} · {r["game"]} · {pd.to_datetime(r["start"]).strftime("%a %b %d %H:%M UTC")}')
             b.markdown(explain(r))
 
 with t2:
     f = st.selectbox("Market", ["all"] + list(MARKETS), format_func=lambda x: "All markets" if x == "all" else MARKETS[x])
-    v = (df if f == "all" else df[df["market"] == f]).sort_values("ev", ascending=False).copy()
+    lg = st.selectbox("League", ["all"] + sorted(df["league"].unique()),
+                      format_func=lambda x: "All leagues" if x == "all" else x)
+    v = df if f == "all" else df[df["market"] == f]
+    v = (v if lg == "all" else v[v["league"] == lg]).sort_values("ev", ascending=False).copy()
     for col in ("implied", "fair", "edge", "ev"):
         v[col] = v[col] * 100
-    st.dataframe(v[["game", "market", "pick", "book", "american", "implied", "fair", "edge", "ev", "conf", "verdict", "stake"]],
+    st.dataframe(v[["league", "game", "market", "pick", "book", "american", "implied", "fair", "edge", "ev", "conf", "verdict", "stake"]],
                  width="stretch", hide_index=True, column_config={
                      "implied": st.column_config.NumberColumn("Implied %", format="%.1f"),
                      "fair": st.column_config.NumberColumn("Fair %", format="%.1f"),
@@ -297,7 +328,7 @@ with t3:
 
 with t4:
     st.markdown("""
-**1. Remove the vig.** Each book's odds are converted to implied probabilities and normalized so each market sums to 100%.
+**1. Remove the vig.** Each book's odds become implied probabilities that are adjusted to sum to 100%. The default power method takes more margin off longshots, as books actually price them. Proportional is available in the sidebar.
 
 **2. Build the fair price.** Vig-free probabilities are averaged across books. Sharp books (default Pinnacle) get extra weight.
 
